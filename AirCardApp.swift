@@ -491,6 +491,7 @@ class AppViewModel: ObservableObject {
     @Published var isReadingWalletCache = false
     @Published var scannerMessage = "Open Wallet and scan cards to verify this iPhone's saved entries."
     @Published var currentScanIDs: Set<String> = []
+    private var currentPreloadedIDs: Set<String> = []
     private var activeCardDeviceID: String?
     private var isLoadingCards = false
     private var catalogRequestID = UUID()
@@ -693,6 +694,7 @@ class AppViewModel: ObservableObject {
         catalogRequestID = UUID()
         walletCatalog = .empty
         currentScanIDs = []
+        currentPreloadedIDs = []
         loadSavedCards()
         saveCards()
     }
@@ -763,6 +765,14 @@ class AppViewModel: ObservableObject {
                 self.refreshWalletCatalog()
             }
         }
+    }
+
+    func recordPreloadedCard(_ id: String) {
+        guard currentPreloadedIDs.insert(id).inserted else { return }
+        if !cards.contains(where: { $0.id == id }) {
+            cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id)))
+        }
+        scannerMessage = "Found \(currentPreloadedIDs.count) Wallet preload candidate(s). Open a card to confirm it."
     }
 
     func recordActivatedPaymentCard(_ activationID: String) {
@@ -910,6 +920,7 @@ class AppViewModel: ObservableObject {
         }
         isScanningCards = true
         currentScanIDs = []
+        currentPreloadedIDs = []
         scannerMessage = "Connecting to the iPhone log stream…"
         statusText = "Double-click Side button, pass Face ID, then tap your card..."
         log("Started scanning device logs for cards...")
@@ -1003,11 +1014,7 @@ class AppViewModel: ObservableObject {
                         for candidate in WalletScanParser.cardIDs(in: line) {
                             await MainActor.run {
                                 guard self.scanProcess === proc else { return }
-                                if self.walletCatalog.paymentStatus == "matched",
-                                   self.walletCatalog.payments.contains(where: { $0.id == candidate }) {
-                                    return
-                                }
-                                self.recordScannedCard(candidate)
+                                self.recordPreloadedCard(candidate)
                             }
                         }
                     }

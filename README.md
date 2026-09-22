@@ -61,7 +61,8 @@ problems and **Read Cache** to reread local metadata.
 
 For payment cards, AirCard uses the NFC activation event for the card you
 actually open. Wallet may preload artwork for several other cards; those
-resource paths are ignored once the device cache is matched.
+resource paths are listed quickly as unconfirmed candidates. Opening a card
+confirms the exact card through its activation event.
 
 Cards and skin file paths are saved by ID separately for each iPhone, in stable
 local discovery order. Legacy saved IDs need a scan confirmation on first use.

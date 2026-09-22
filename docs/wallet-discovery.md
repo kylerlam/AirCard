@@ -11,7 +11,7 @@ scan events update the same item; identical display names do not merge cards.
 
 Payment-card confirmation uses the activated secure-element application ID
 from the NFC log and maps it to the exact pass ID in the matched Mac cache.
-Wallet's batch resource preloads are ignored for known payment cards because
+Wallet's batch resource preloads are shown as unconfirmed candidates because
 their order does not represent either user selection or Wallet display order.
 
 The grid contains saved or scanned IDs only. Cache-only entries appear under
