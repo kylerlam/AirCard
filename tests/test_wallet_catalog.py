@@ -13,7 +13,9 @@ C = 'C' * 27 + '='
 
 def device(ids, model='iPhone16,1'):
     return {'modelIdentifier': model, 'remotePaymentInstruments': [
-        {'passID': i, 'displayName': 'Same bank', 'primaryAccountIdentifier': 'must-not-export'} for i in ids
+        {'passID': i, 'displayName': 'Same bank', 'primaryAccountIdentifier': 'must-not-export',
+         'primaryPaymentApplication': {'applicationIdentifier': 'A0000000000000000' + str(n)}}
+        for n, i in enumerate(ids)
     ]}
 
 
@@ -36,12 +38,19 @@ class WalletCatalogTests(unittest.TestCase):
         self.assertEqual(result['paymentStatus'], 'matched')
         self.assertEqual([c['id'] for c in result['payments']], [A, B])
         self.assertEqual([c['name'] for c in result['payments']], ['Same bank', 'Same bank'])
+        self.assertEqual(result['payments'][0]['activationID'], 'A00000000000000000')
         self.assertNotIn('must-not-export', json.dumps(result))
 
-    def test_matching_model_alone_is_not_device_identity(self):
+    def test_unique_matching_model_can_bootstrap_activation_mapping(self):
         write_archive(self.root, [device([A])])
         result = build_catalog(self.root, [], 'iPhone16,1')
-        self.assertEqual(result['paymentStatus'], 'unmatched')
+        self.assertEqual(result['paymentStatus'], 'matched')
+        self.assertEqual([c['id'] for c in result['payments']], [A])
+
+    def test_multiple_matching_models_without_overlap_are_ambiguous(self):
+        write_archive(self.root, [device([A]), device([B])])
+        result = build_catalog(self.root, [], 'iPhone16,1')
+        self.assertEqual(result['paymentStatus'], 'ambiguous')
         self.assertEqual(result['payments'], [])
 
     def test_wrong_device_model_does_not_match(self):

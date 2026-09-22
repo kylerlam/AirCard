@@ -765,6 +765,18 @@ class AppViewModel: ObservableObject {
         }
     }
 
+    func recordActivatedPaymentCard(_ activationID: String) {
+        guard let card = walletCatalog.payment(forActivationID: activationID) else {
+            scannerMessage = "A payment card was activated, but its ID is not available in this Mac's Wallet cache. Use Read Cache and try again."
+            return
+        }
+        recordScannedCard(card.id)
+        if let index = cards.firstIndex(where: { $0.id == card.id }) {
+            cards[index].displayName = card.name
+        }
+        scannerMessage = "Detected active card: \(card.name). Open the next card when ready."
+    }
+
     func addCardHash(_ raw: String) {
         let components = raw.components(separatedBy: CharacterSet(charactersIn: " \n\r\t,;"))
         var addedCount = 0
@@ -980,10 +992,21 @@ class AppViewModel: ObservableObject {
                                               lower.contains("/cards/")
                         
                         guard isWalletContext else { continue }
+
+                        for activationID in WalletScanParser.activationIDs(in: line) {
+                            await MainActor.run {
+                                guard self.scanProcess === proc else { return }
+                                self.recordActivatedPaymentCard(activationID)
+                            }
+                        }
                         
                         for candidate in WalletScanParser.cardIDs(in: line) {
                             await MainActor.run {
                                 guard self.scanProcess === proc else { return }
+                                if self.walletCatalog.paymentStatus == "matched",
+                                   self.walletCatalog.payments.contains(where: { $0.id == candidate }) {
+                                    return
+                                }
                                 self.recordScannedCard(candidate)
                             }
                         }

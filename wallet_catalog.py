@@ -46,10 +46,13 @@ def read_limited(path: Path) -> bytes:
     return data
 
 
-def card(identifier, name, source):
+def card(identifier, name, source, activation_id=None):
     if not isinstance(identifier, str) or not CARD_ID.fullmatch(identifier):
         return None
-    return {"id": identifier, "name": name.strip()[:200] if isinstance(name, str) and name.strip() else "Unnamed card", "source": source}
+    result = {"id": identifier, "name": name.strip()[:200] if isinstance(name, str) and name.strip() else "Unnamed card", "source": source}
+    if isinstance(activation_id, str) and re.fullmatch(r"[A-Fa-f0-9]{10,64}", activation_id):
+        result["activationID"] = activation_id.upper()
+    return result
 
 
 def unique_cards(rows):
@@ -58,6 +61,12 @@ def unique_cards(rows):
         if row is not None:
             result.setdefault(row["id"], row)
     return list(result.values())
+
+
+def payment_card(data):
+    application = data.get("primaryPaymentApplication")
+    activation_id = application.get("applicationIdentifier") if isinstance(application, dict) else None
+    return card(data.get("passID"), data.get("displayName") or data.get("organizationName"), "payment", activation_id)
 
 
 def build_catalog(root: Path, confirmed_ids: list[str], product: str) -> dict:
@@ -75,16 +84,22 @@ def build_catalog(root: Path, confirmed_ids: list[str], product: str) -> dict:
             instruments = device.get("remotePaymentInstruments")
             if not isinstance(instruments, list):
                 continue
-            rows = unique_cards(card(p.get("passID"), p.get("displayName") or p.get("organizationName"), "payment")
+            rows = unique_cards(payment_card(p)
                                 for p in instruments if isinstance(p, dict))
-            if confirmed.intersection(p["id"] for p in rows):
-                candidates.append(rows)
-        if len(candidates) == 1:
+            candidates.append(rows)
+        matching = [rows for rows in candidates if confirmed.intersection(p["id"] for p in rows)]
+        if len(matching) == 1:
+            result["paymentStatus"] = "matched"
+            result["payments"] = matching[0]
+        elif len(matching) > 1:
+            result["paymentStatus"] = "ambiguous"
+            result["warnings"].append("More than one cached device matches these cards. Payment names and missing-card counts are withheld.")
+        elif len(candidates) == 1:
             result["paymentStatus"] = "matched"
             result["payments"] = candidates[0]
         elif len(candidates) > 1:
             result["paymentStatus"] = "ambiguous"
-            result["warnings"].append("More than one cached device matches these cards. Payment names and missing-card counts are withheld.")
+            result["warnings"].append("More than one cached device has this model. Activate one payment card to identify the correct Wallet cache.")
         else:
             result["paymentStatus"] = "unmatched"
             result["warnings"].append("Scan a payment card on the connected iPhone to match its cache. A missing match can also mean the Mac cache is unavailable or out of date.")

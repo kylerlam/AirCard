@@ -10,6 +10,9 @@ struct WalletDiscoveryTests {
         precondition(WalletScanParser.cardIDs(in: line) == [b, a])
         precondition(WalletScanParser.cardIDs(in: "passd identifier \(a)").isEmpty)
         precondition(WalletScanParser.cardIDs(in: "/Cards/<private>.pkpass").isEmpty)
+        let activation = "A00000000310100100000020"
+        let activeLine = "setActivePaymentApplet: x requestedApplet: <NFApplet> { identifier=\(activation) family=0x0 }"
+        precondition(WalletScanParser.activationIDs(in: activeLine) == [activation])
         let cards = [WalletSavedCard(id: b, confirmed: true, imagePath: "/skin-b.png", selected: false),
                      WalletSavedCard(id: a, imagePath: "/skin-a.png"),
                      WalletSavedCard(id: b), WalletSavedCard(id: a, confirmed: true)]
@@ -20,12 +23,13 @@ struct WalletDiscoveryTests {
         let restored = try JSONDecoder().decode([WalletSavedCard].self, from: JSONEncoder().encode(unique))
         precondition(restored == unique)
         let catalog = WalletCatalog(paymentStatus: "matched", payments: [
-            WalletCachedCard(id: a, name: "Same bank", source: "payment"),
+            WalletCachedCard(id: a, name: "Same bank", source: "payment", activationID: activation),
             WalletCachedCard(id: b, name: "Same bank", source: "payment")
         ], memberships: [WalletCachedCard(id: c, name: "Membership", source: "membership")], warnings: [], cacheUpdatedAt: nil)
         precondition(catalog.pending(confirmedIDs: [a], source: "payment").map(\.id) == [b])
         precondition(catalog.pending(confirmedIDs: [a], source: "membership").map(\.id) == [c])
         precondition(catalog.name(for: a) == "Same bank")
+        precondition(catalog.payment(forActivationID: activation)?.id == a)
         precondition(catalog.name(for: "missing") == nil)
         // A view reorder must still attach skin B to ID B, never its old offset.
         let skins = Dictionary(uniqueKeysWithValues: restored.map { ($0.id, $0.imagePath) })
