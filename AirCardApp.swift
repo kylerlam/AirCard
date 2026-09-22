@@ -498,6 +498,8 @@ class AppViewModel: ObservableObject {
     private var catalogRefreshTask: Task<Void, Never>?
 
     var confirmedCardIDs: Set<String> { Set(cards.filter(\.confirmed).map(\.id)) }
+    var currentVerifiedCardIDs: Set<String> { currentScanIDs.union(currentPreloadedIDs) }
+    var currentVerifiedCards: [CardItem] { cards.filter { currentVerifiedCardIDs.contains($0.id) } }
     var pendingPaymentCards: [WalletCachedCard] { walletCatalog.pending(confirmedIDs: confirmedCardIDs, source: "payment") }
     var pendingMembershipCards: [WalletCachedCard] { walletCatalog.pending(confirmedIDs: confirmedCardIDs, source: "membership") }
 
@@ -769,10 +771,13 @@ class AppViewModel: ObservableObject {
 
     func recordPreloadedCard(_ id: String) {
         guard currentPreloadedIDs.insert(id).inserted else { return }
-        if !cards.contains(where: { $0.id == id }) {
-            cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id)))
+        if let index = cards.firstIndex(where: { $0.id == id }) {
+            if !cards[index].confirmed { cards[index].confirmed = true }
+        } else {
+            cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id), confirmed: true))
+            NSSound(named: "Glass")?.play()
         }
-        scannerMessage = "Found \(currentPreloadedIDs.count) Wallet preload candidate(s). Open a card to confirm it."
+        scannerMessage = "Verified \(currentVerifiedCardIDs.count) card(s) from this iPhone's current Wallet activity."
     }
 
     func recordActivatedPaymentCard(_ activationID: String) {
@@ -800,6 +805,7 @@ class AppViewModel: ObservableObject {
         }
         if addedCount > 0 {
             saveCards()
+            scannerMessage = "Saved \(addedCount) ID(s) for matching. They stay hidden until this iPhone exposes them in a scan."
         }
     }
     
@@ -1069,7 +1075,8 @@ class AppViewModel: ObservableObject {
             errorMessage = "No iPhone connected."
             return
         }
-        let selectedCardsWithSkin = cards.filter { $0.isSelected && $0.customImageURL != nil }
+        let verifiedIDs = currentVerifiedCardIDs
+        let selectedCardsWithSkin = cards.filter { verifiedIDs.contains($0.id) && $0.isSelected && $0.customImageURL != nil }
         guard !selectedCardsWithSkin.isEmpty else {
             errorMessage = "Please assign a skin image to at least one selected card."
             return
@@ -1713,7 +1720,7 @@ struct WalletCardView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(2)
                     .help(card.displayName ?? "No matching name in the Mac cache. The card ID is preserved.")
-                Text(card.confirmed ? "Scanned on this iPhone" : "Saved ID · scan to confirm on this iPhone")
+                Text("Observed on this iPhone in the current scan")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 if card.customImageURL != nil && card.customImage == nil {
@@ -1800,7 +1807,7 @@ struct ContentView: View {
     @State private var isTargetedTheme = false
     
     private var readyToFlashCount: Int {
-        vm.cards.filter { $0.isSelected && $0.customImageURL != nil }.count
+        vm.currentVerifiedCards.filter { $0.isSelected && $0.customImageURL != nil }.count
     }
     
     var body: some View {
@@ -1842,7 +1849,7 @@ struct ContentView: View {
             // 4. Main Workspace
             if vm.selectedTab == .walletCards {
                 ScrollView {
-                    if vm.cards.isEmpty {
+                    if vm.currentVerifiedCards.isEmpty {
                         emptyStateView
                             .padding(.top, 40)
                     } else {
@@ -1850,20 +1857,22 @@ struct ContentView: View {
                             columns: [GridItem(.adaptive(minimum: 310, maximum: 360), spacing: 20)],
                             spacing: 20
                         ) {
-                            ForEach($vm.cards) { $card in
-                                let cardID = card.id
-                                let deviceID = vm.device?.udid
-                                WalletCardView(
-                                    card: $card,
-                                    cardIndex: vm.cards.firstIndex(where: { $0.id == card.id }) ?? 0,
-                                    onPickImage: { openCardImagePicker(for: cardID) },
-                                    onClearImage: { vm.clearCardImage(for: cardID) },
-                                    onDelete: { vm.deleteCard(id: cardID) },
-                                    onDropImage: { url in
-                                        guard vm.device?.udid == deviceID else { return }
-                                        vm.setCardImage(for: cardID, url: url)
-                                    }
-                                )
+                            ForEach(Array(vm.currentVerifiedCards.enumerated()), id: \.element.id) { visibleIndex, verifiedCard in
+                                if let cardIndex = vm.cards.firstIndex(where: { $0.id == verifiedCard.id }) {
+                                    let cardID = verifiedCard.id
+                                    let deviceID = vm.device?.udid
+                                    WalletCardView(
+                                        card: $vm.cards[cardIndex],
+                                        cardIndex: visibleIndex,
+                                        onPickImage: { openCardImagePicker(for: cardID) },
+                                        onClearImage: { vm.clearCardImage(for: cardID) },
+                                        onDelete: { vm.deleteCard(id: cardID) },
+                                        onDropImage: { url in
+                                            guard vm.device?.udid == deviceID else { return }
+                                            vm.setCardImage(for: cardID, url: url)
+                                        }
+                                    )
+                                }
                             }
                         }
                         .padding(20)
@@ -2026,12 +2035,12 @@ struct ContentView: View {
             .disabled(vm.device?.connected != true || vm.isCheckingDevice || vm.isFlashing)
             
             Button(action: { vm.showAddCardSheet = true }) {
-                Label("Add Manually", systemImage: "plus")
+                Label("Save IDs", systemImage: "plus")
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)
             
-            if !vm.cards.isEmpty {
+            if !vm.currentVerifiedCards.isEmpty {
                 Button(action: openBulkImagePicker) {
                     Label("Set Skin for All...", systemImage: "photo.on.rectangle.angled")
                 }
@@ -2042,10 +2051,13 @@ struct ContentView: View {
             
             Spacer()
             
-            if !vm.cards.isEmpty {
+            if !vm.currentVerifiedCards.isEmpty {
                 HStack(spacing: 8) {
                     Button("Select All") {
-                        for idx in vm.cards.indices { vm.cards[idx].isSelected = true }
+                        let verifiedIDs = vm.currentVerifiedCardIDs
+                        for idx in vm.cards.indices where verifiedIDs.contains(vm.cards[idx].id) {
+                            vm.cards[idx].isSelected = true
+                        }
                     }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -2053,7 +2065,10 @@ struct ContentView: View {
                     Text("·").foregroundColor(.secondary)
                     
                     Button("Deselect All") {
-                        for idx in vm.cards.indices { vm.cards[idx].isSelected = false }
+                        let verifiedIDs = vm.currentVerifiedCardIDs
+                        for idx in vm.cards.indices where verifiedIDs.contains(vm.cards[idx].id) {
+                            vm.cards[idx].isSelected = false
+                        }
                     }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -2148,7 +2163,7 @@ struct ContentView: View {
                 .controlSize(.regular)
                 .disabled(vm.device?.connected != true || vm.isCheckingDevice || vm.isFlashing)
                 
-                Button("Add Hashes Manually") {
+                Button("Save IDs for Matching") {
                     vm.showAddCardSheet = true
                 }
                 .buttonStyle(.bordered)
@@ -3239,8 +3254,8 @@ struct ContentView: View {
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                         }
-                    } else if !vm.cards.isEmpty {
-                        Text("\(vm.cards.filter { $0.isSelected }.count) of \(vm.cards.count) cards selected · \(readyToFlashCount) ready to flash")
+                    } else if !vm.currentVerifiedCards.isEmpty {
+                        Text("\(vm.currentVerifiedCards.filter { $0.isSelected }.count) of \(vm.currentVerifiedCards.count) verified cards selected · \(readyToFlashCount) ready to flash")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }
@@ -3424,9 +3439,9 @@ struct ContentView: View {
     
     private var addCardSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Add Card Hashes Manually")
+            Text("Save Card IDs for Matching")
                 .font(.headline)
-            Text("Paste one or more card hashes (separated by spaces, commas, or newlines):")
+            Text("Paste one or more card IDs. Saved IDs remain hidden until the connected iPhone exposes them in a scan.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             
@@ -3446,7 +3461,7 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                Button("Add to List") {
+                Button("Save IDs") {
                     vm.addCardHash(vm.manualHashInput)
                     vm.showAddCardSheet = false
                     vm.manualHashInput = ""
@@ -3478,7 +3493,7 @@ struct ContentView: View {
         panel.canChooseDirectories = false
         panel.message = "Choose a skin to assign to all selected cards..."
         if panel.runModal() == .OK, let url = panel.url {
-            for card in vm.cards where card.isSelected {
+            for card in vm.currentVerifiedCards where card.isSelected {
                 vm.setCardImage(for: card.id, url: url)
             }
         }

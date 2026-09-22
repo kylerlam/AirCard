@@ -13,6 +13,7 @@ struct WalletViewModelTests {
         defaults.set([b, a, b], forKey: "mak5er.aircard.savedCards")
         let vm = AppViewModel(cardDefaults: defaults, connectOnLaunch: false)
         precondition(vm.cards.map(\.id) == [b, a])
+        precondition(vm.currentVerifiedCards.isEmpty) // Saved records stay hidden until this scan sees them.
         precondition(vm.confirmedCardIDs.isEmpty) // Legacy IDs have no device provenance.
         vm.activateCardDevice("first-phone")
         vm.recordScannedCard(a)
@@ -49,7 +50,8 @@ struct WalletViewModelTests {
         relaunched.recordPreloadedCard(c)
         relaunched.recordPreloadedCard(c)
         precondition(relaunched.cards.count == countBeforePreload + 1)
-        precondition(relaunched.cards.first(where: { $0.id == c })?.confirmed == false)
+        precondition(relaunched.cards.first(where: { $0.id == c })?.confirmed == true)
+        precondition(relaunched.currentVerifiedCards.map(\.id) == [c])
         print("Wallet view model migration, device isolation, repeat scans, skin identity and clear/relaunch passed")
     }
 }

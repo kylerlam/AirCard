@@ -12,9 +12,9 @@ struct WalletDiagnosticsView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("\(vm.confirmedCardIDs.count) scanned on this iPhone · \(vm.cards.count - vm.confirmedCardIDs.count) saved IDs to confirm")
+                    Text("\(vm.currentVerifiedCardIDs.count) verified in this scan · \(vm.cards.count - vm.currentVerifiedCardIDs.count) saved IDs hidden")
                         .font(.caption).fontWeight(.semibold)
-                    Text("Saved discovery order · phone order and total card count are unknown")
+                    Text("Only IDs observed in current iPhone activity are shown and eligible to flash")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()

@@ -11,15 +11,16 @@ scan events update the same item; identical display names do not merge cards.
 
 Payment-card confirmation uses the activated secure-element application ID
 from the NFC log and maps it to the exact pass ID in the matched Mac cache.
-Wallet's batch resource preloads are shown as unconfirmed candidates because
-their order does not represent either user selection or Wallet display order.
+Wallet's batch resource paths can also verify existence because they are
+observed in the current iPhone log, although their order does not represent
+either user selection or Wallet display order.
 
-The grid contains saved or scanned IDs only. Cache-only entries appear under
-**Check missing cards**, not in the flash selection:
+The grid contains only IDs observed in the current scan. Saved records and
+cache-only entries stay hidden and are excluded from flashing until current
+iPhone activity exposes the ID again:
 
-- **Scan-confirmed** means the ID has been observed in a pass/cache path in this
-  iPhone's logs, including a saved confirmation from an earlier session. The
-  scanner message separately reports distinct IDs seen in the current scan.
+- **Verified in this scan** means the ID has been observed in a pass/cache path
+  or exact activation event in this iPhone's current logs.
 - **Saved IDs to confirm** includes migrated legacy IDs and manually added IDs
   that have not been scanned on this iPhone in the new version.
 - **Payment entries to confirm** come from one matching remote-device cache.
@@ -56,8 +57,9 @@ version-two list is authoritative, so clearing cards does not reimport legacy
 entries on restart. Saved images retain their file paths; if an original image
 file is moved or deleted, choose it again using the unavailable-image notice.
 
-Confirmed IDs may remain saved after a card is removed from the phone. AirCard
-does not infer removal from silence in a log or a missing cache entry.
+Saved IDs may remain after a card is removed from the phone, but they are not
+shown or eligible to flash unless a new scan observes them again. AirCard does
+not treat silence in a log or a Mac cache entry as proof that a card exists.
 
 ## Validation
 
