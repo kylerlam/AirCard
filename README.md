@@ -52,6 +52,19 @@
 5. Click **Flash Skins**.
 6. Force-close the **Wallet** app on your iPhone from the App Switcher (or reboot) to see your new custom card design!
 
+### Card names and missing-card checks
+
+Scanned cards can now display names from this Mac's Wallet cache. Open **Check
+missing cards** to distinguish scan-confirmed IDs from payment and membership
+cache entries that still need confirmation. Use **Reconnect** for connection
+problems and **Read Cache** to reread local metadata.
+
+Cards and skin file paths are saved by ID separately for each iPhone, in stable
+local discovery order. Legacy saved IDs need a scan confirmation on first use.
+Cache entries are not automatically added to the flash selection. Cache counts
+are not the phone's total, and phone Wallet order is not synchronized. See
+[card identification and diagnostics](docs/wallet-discovery.md).
+
 ### If scanning finds no cards
 
 The scanner uses the iPhone's unified log service, including Info/Debug events.

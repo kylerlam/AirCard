@@ -1,0 +1,36 @@
+import Foundation
+
+@main
+struct WalletDiscoveryTests {
+    static func main() throws {
+        let a = String(repeating: "A", count: 27) + "="
+        let b = String(repeating: "B", count: 27) + "="
+        let c = String(repeating: "C", count: 27) + "="
+        let line = "Wallet /Cards/\(b).cache/Preview /Cards/\(a).pkpass/en.lproj /Cards/\(b).pkcache/FrontFace"
+        precondition(WalletScanParser.cardIDs(in: line) == [b, a])
+        precondition(WalletScanParser.cardIDs(in: "passd identifier \(a)").isEmpty)
+        precondition(WalletScanParser.cardIDs(in: "/Cards/<private>.pkpass").isEmpty)
+        let cards = [WalletSavedCard(id: b, confirmed: true, imagePath: "/skin-b.png", selected: false),
+                     WalletSavedCard(id: a, imagePath: "/skin-a.png"),
+                     WalletSavedCard(id: b), WalletSavedCard(id: a, confirmed: true)]
+        let unique = WalletSavedCard.unique(cards)
+        precondition(unique.map(\.id) == [b, a])
+        precondition(unique[0].imagePath == "/skin-b.png" && !unique[0].selected)
+        precondition(unique[1].imagePath == "/skin-a.png" && unique[1].confirmed)
+        let restored = try JSONDecoder().decode([WalletSavedCard].self, from: JSONEncoder().encode(unique))
+        precondition(restored == unique)
+        let catalog = WalletCatalog(paymentStatus: "matched", payments: [
+            WalletCachedCard(id: a, name: "Same bank", source: "payment"),
+            WalletCachedCard(id: b, name: "Same bank", source: "payment")
+        ], memberships: [WalletCachedCard(id: c, name: "Membership", source: "membership")], warnings: [], cacheUpdatedAt: nil)
+        precondition(catalog.pending(confirmedIDs: [a], source: "payment").map(\.id) == [b])
+        precondition(catalog.pending(confirmedIDs: [a], source: "membership").map(\.id) == [c])
+        precondition(catalog.name(for: a) == "Same bank")
+        precondition(catalog.name(for: "missing") == nil)
+        // A view reorder must still attach skin B to ID B, never its old offset.
+        let skins = Dictionary(uniqueKeysWithValues: restored.map { ($0.id, $0.imagePath) })
+        let reordered = [a, b].map { skins[$0]!! }
+        precondition(reordered == ["/skin-a.png", "/skin-b.png"])
+        print("Wallet identity, pending counts, deduplication, persistence and path parsing passed")
+    }
+}
