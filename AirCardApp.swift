@@ -917,11 +917,13 @@ class AppViewModel: ObservableObject {
         guard !isScanningCards, !isFlashing, !isCheckingDevice else { return }
         guard let deviceHelper = AppViewModel.deviceHelperExecutableURL else {
             errorMessage = "Device tools are missing from this build."
+            scannerMessage = "Device tools are missing. Rebuild or reinstall AirCard, then reconnect."
             log("Bundled device_helper not found — cannot scan.")
             return
         }
         guard let udid = device?.udid else {
             errorMessage = "No iPhone connected."
+            scannerMessage = "No iPhone connected. Connect, unlock and trust this Mac, then use Reconnect."
             return
         }
         isScanningCards = true
@@ -2017,7 +2019,7 @@ struct ContentView: View {
             // Live Scanner Toggle
             Button(action: { vm.toggleCardScanning() }) {
                 HStack(spacing: 6) {
-                    if vm.isScanningCards {
+                    if vm.isScanningCards || vm.isCheckingDevice {
                         ProgressView()
                             .scaleEffect(0.65)
                             .frame(width: 16, height: 16)
@@ -2025,7 +2027,7 @@ struct ContentView: View {
                         Image(systemName: "wave.3.forward.circle.fill")
                             .frame(width: 16, height: 16)
                     }
-                    Text(vm.isScanningCards ? "Stop Scanning" : "Scan Cards")
+                    Text(vm.isCheckingDevice ? "Checking iPhone…" : vm.isScanningCards ? "Stop Scanning" : "Scan Cards")
                         .fontWeight(.semibold)
                 }
             }
@@ -2123,7 +2125,7 @@ struct ContentView: View {
                 .font(.system(size: 54))
                 .foregroundColor(.accentColor.opacity(0.8))
             
-            Text("No Cards Detected Yet")
+            Text(vm.isScanningCards ? "Scanning for Cards…" : "No Cards Detected Yet")
                 .font(.title3)
                 .fontWeight(.bold)
             
@@ -2132,7 +2134,7 @@ struct ContentView: View {
                     Text("1.")
                         .fontWeight(.bold)
                         .foregroundColor(.accentColor)
-                    Text("Click **Scan Cards** in the toolbar above.")
+                    Text(vm.isScanningCards ? "Scanner is active. Open Wallet on your iPhone." : "Click **Scan Cards** in the toolbar above.")
                 }
                 HStack(alignment: .top, spacing: 10) {
                     Text("2.")
@@ -2144,7 +2146,7 @@ struct ContentView: View {
                     Text("3.")
                         .fontWeight(.bold)
                         .foregroundColor(.accentColor)
-                    Text("Your card will be detected immediately!")
+                    Text(vm.isScanningCards ? "Detected cards will appear here as the iPhone reports them." : "Your card will be detected immediately!")
                 }
             }
             .font(.subheadline)
@@ -2155,8 +2157,8 @@ struct ContentView: View {
             .cornerRadius(12)
             
             HStack(spacing: 12) {
-                Button(action: { vm.startCardScanning() }) {
-                    Label("Start Scanning", systemImage: "wave.3.forward.circle.fill")
+                Button(action: { vm.toggleCardScanning() }) {
+                    Label(vm.isCheckingDevice ? "Checking iPhone…" : vm.isScanningCards ? "Stop Scanning" : "Start Scanning", systemImage: "wave.3.forward.circle.fill")
                         .fontWeight(.semibold)
                 }
                 .buttonStyle(.borderedProminent)
