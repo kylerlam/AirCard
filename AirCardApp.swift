@@ -496,6 +496,7 @@ class AppViewModel: ObservableObject {
     private var isLoadingCards = false
     private var catalogRequestID = UUID()
     private var catalogRefreshTask: Task<Void, Never>?
+    private var pendingActivationIDs: Set<String> = []
 
     var confirmedCardIDs: Set<String> { Set(cards.filter(\.confirmed).map(\.id)) }
     var currentVerifiedCardIDs: Set<String> { currentScanIDs.union(currentPreloadedIDs) }
@@ -697,6 +698,7 @@ class AppViewModel: ObservableObject {
         walletCatalog = .empty
         currentScanIDs = []
         currentPreloadedIDs = []
+        pendingActivationIDs = []
         loadSavedCards()
         saveCards()
     }
@@ -746,6 +748,9 @@ class AppViewModel: ObservableObject {
                     let name = result.name(for: self.cards[index].id)
                     if self.cards[index].displayName != name { self.cards[index].displayName = name }
                 }
+                if self.isScanningCards {
+                    self.reconcilePendingPaymentActivations()
+                }
             }
         }
     }
@@ -780,16 +785,32 @@ class AppViewModel: ObservableObject {
         scannerMessage = "Verified \(currentVerifiedCardIDs.count) card(s) from this iPhone's current Wallet activity."
     }
 
-    func recordActivatedPaymentCard(_ activationID: String) {
-        guard let card = walletCatalog.payment(forActivationID: activationID) else {
-            scannerMessage = "A payment card was activated, but its ID is not available in this Mac's Wallet cache. Use Read Cache and try again."
-            return
+    @discardableResult
+    func recordActivatedPaymentCard(_ activationID: String, refreshIfNeeded: Bool = true) -> Bool {
+        let normalizedID = activationID.uppercased()
+        guard let card = walletCatalog.payment(forActivationID: normalizedID) else {
+            pendingActivationIDs.insert(normalizedID)
+            scannerMessage = isReadingWalletCache
+                ? "Payment card activated. Waiting for Wallet metadata to finish loading…"
+                : "A payment card was activated, but its ID is not available in this Mac's Wallet cache. Use Read Cache and try again."
+            if refreshIfNeeded && device?.connected == true && !isReadingWalletCache {
+                refreshWalletCatalog()
+            }
+            return false
         }
+        pendingActivationIDs.remove(normalizedID)
         recordScannedCard(card.id)
         if let index = cards.firstIndex(where: { $0.id == card.id }) {
             cards[index].displayName = card.name
         }
         scannerMessage = "Detected active card: \(card.name). Open the next card when ready."
+        return true
+    }
+
+    func reconcilePendingPaymentActivations() {
+        for activationID in Array(pendingActivationIDs) {
+            _ = recordActivatedPaymentCard(activationID, refreshIfNeeded: false)
+        }
     }
 
     func addCardHash(_ raw: String) {
@@ -929,6 +950,7 @@ class AppViewModel: ObservableObject {
         isScanningCards = true
         currentScanIDs = []
         currentPreloadedIDs = []
+        pendingActivationIDs = []
         scannerMessage = "Connecting to the iPhone log stream…"
         statusText = "Double-click Side button, pass Face ID, then tap your card..."
         log("Started scanning device logs for cards...")
@@ -992,9 +1014,13 @@ class AppViewModel: ObservableObject {
                         let isWalletSubsystem = lower.contains("passd") ||
                                                 lower.contains("passbook") ||
                                                 lower.contains("passkit") ||
+                                                lower.contains("nfcd") ||
                                                 lower.contains("stockholm") ||
                                                 lower.contains("nanopassd") ||
                                                 lower.contains("wallet") ||
+                                                lower.contains("pdcardfilemanager") ||
+                                                lower.contains("pdpasslibrary") ||
+                                                lower.contains("verificationcheck") ||
                                                 lower.contains("/cards/")
                         
                         guard isWalletSubsystem else { continue }
@@ -1008,6 +1034,9 @@ class AppViewModel: ObservableObject {
                                               lower.contains("face") ||
                                               lower.contains("cache") ||
                                               lower.contains("stockholm") ||
+                                              lower.contains("pdcardfilemanager") ||
+                                              lower.contains("pdpasslibrary") ||
+                                              lower.contains("verificationcheck") ||
                                               lower.contains("/cards/")
                         
                         guard isWalletContext else { continue }
@@ -1055,6 +1084,7 @@ class AppViewModel: ObservableObject {
     
     func stopCardScanning() {
         catalogRefreshTask?.cancel()
+        pendingActivationIDs = []
         if isScanningCards {
             scannerMessage = currentScanIDs.isEmpty ? "No cards detected in this scan. Open Wallet and tap the missing card, then retry. Some iOS logs hide identifiers." : "Scan stopped. \(currentScanIDs.count) distinct card(s) seen; missing cards remain unconfirmed."
         }

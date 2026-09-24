@@ -21,8 +21,9 @@ struct WalletViewModelTests {
         precondition(vm.currentScanIDs == [a] && vm.confirmedCardIDs == [a])
         precondition(vm.cards.count == 2)
         let activation = "A00000000310100100000020"
+        precondition(!vm.recordActivatedPaymentCard(activation))
         vm.walletCatalog = WalletCatalog(paymentStatus: "matched", payments: [.init(id: b, name: "Active B", source: "payment", activationID: activation)], memberships: [], warnings: [], cacheUpdatedAt: nil)
-        vm.recordActivatedPaymentCard(activation)
+        vm.reconcilePendingPaymentActivations()
         precondition(vm.cards.first(where: { $0.id == b })?.displayName == "Active B")
         vm.cards[0].customImageURL = URL(fileURLWithPath: "/skin-b.png")
         vm.cards[1].customImageURL = URL(fileURLWithPath: "/skin-a.png")

@@ -10,9 +10,20 @@ struct WalletDiscoveryTests {
         precondition(WalletScanParser.cardIDs(in: line) == [b, a])
         precondition(WalletScanParser.cardIDs(in: "passd identifier \(a)").isEmpty)
         precondition(WalletScanParser.cardIDs(in: "/Cards/<private>.pkpass").isEmpty)
+        let ios27Line = "nfcd: passIDs[InSession]: {(\"\(c)\")} passIDs[global]: {(\"\(a)\")}"
+        precondition(WalletScanParser.cardIDs(in: ios27Line) == [c])
+        precondition(WalletScanParser.cardIDs(in: "nfcd: passIDs[global]: {(\"\(a)\")}").isEmpty)
+        precondition(WalletScanParser.cardIDs(in: "Wallet /Passes/Cards/\(a)/FrontFace") == [a])
+        precondition(WalletScanParser.cardIDs(in: "PDCardFileManager: writing card \(b)") == [b])
+        precondition(WalletScanParser.cardIDs(in: "PDPassLibrary: wrote pass \(a)") == [a])
+        precondition(WalletScanParser.cardIDs(in: "VerificationCheck.\(c)") == [c])
+        precondition(WalletScanParser.cardIDs(in: "updated selected pass uniqueID: \(b)") == [b])
+        precondition(WalletScanParser.cardIDs(in: "updated selected pass uniqueID: <private>").isEmpty)
         let activation = "A00000000310100100000020"
         let activeLine = "setActivePaymentApplet: x requestedApplet: <NFApplet> { identifier=\(activation) family=0x0 }"
         precondition(WalletScanParser.activationIDs(in: activeLine) == [activation])
+        let multilineActivation = "setActivePaymentApplet: x requestedApplet:\n<NFApplet> { identifier = \(activation) family=0x0 }"
+        precondition(WalletScanParser.activationIDs(in: multilineActivation) == [activation])
         let cards = [WalletSavedCard(id: b, confirmed: true, imagePath: "/skin-b.png", selected: false),
                      WalletSavedCard(id: a, imagePath: "/skin-a.png"),
                      WalletSavedCard(id: b), WalletSavedCard(id: a, confirmed: true)]
