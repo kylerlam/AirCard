@@ -9,6 +9,9 @@ struct DeviceInfo: Codable {
     var name: String?
     var version: String?
     var product: String?
+    var language: String?
+    var locale: String?
+    var bold_text: Bool?
     var airlift_compatible: Bool?
     var connected: Bool
     var error: String?
@@ -19,13 +22,15 @@ struct CardItem: Identifiable, Hashable {
     var isSelected: Bool = true
     var customImageURL: URL? = nil
     var customImage: NSImage? = nil
+    var displayName: String? = nil
+    var confirmed: Bool = false
     
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
     
     static func == (lhs: CardItem, rhs: CardItem) -> Bool {
-        lhs.id == rhs.id && lhs.isSelected == rhs.isSelected && lhs.customImageURL == rhs.customImageURL
+        lhs.id == rhs.id && lhs.isSelected == rhs.isSelected && lhs.customImageURL == rhs.customImageURL && lhs.displayName == rhs.displayName && lhs.confirmed == rhs.confirmed
     }
 }
 
@@ -482,7 +487,26 @@ class AppViewModel: ObservableObject {
     @Published var device: DeviceInfo?
     @Published var isCheckingDevice = false
     @Published var isScanningCards = false
-    @Published var cards: [CardItem] = []
+    @Published var cards: [CardItem] = [] {
+        didSet { if !isLoadingCards { saveCards() } }
+    }
+    @Published var walletCatalog = WalletCatalog.empty
+    @Published var isReadingWalletCache = false
+    @Published var scannerMessage = "Open Wallet and scan cards to verify this iPhone's saved entries."
+    @Published var currentScanIDs: Set<String> = []
+    private var currentPreloadedIDs: Set<String> = []
+    private var activeCardDeviceID: String?
+    private var isLoadingCards = false
+    private var catalogRequestID = UUID()
+    private var catalogRefreshTask: Task<Void, Never>?
+    private var pendingActivationIDs: Set<String> = []
+
+    var confirmedCardIDs: Set<String> { Set(cards.filter(\.confirmed).map(\.id)) }
+    var currentVerifiedCardIDs: Set<String> { currentScanIDs.union(currentPreloadedIDs) }
+    var currentVerifiedCards: [CardItem] { cards.filter { currentVerifiedCardIDs.contains($0.id) } }
+    var pendingPaymentCards: [WalletCachedCard] { walletCatalog.pending(confirmedIDs: confirmedCardIDs, source: "payment") }
+    var pendingMembershipCards: [WalletCachedCard] { walletCatalog.pending(confirmedIDs: confirmedCardIDs, source: "membership") }
+
     
     @Published var isFlashing = false
     @Published var progress: Double = 0.0
@@ -497,17 +521,13 @@ class AppViewModel: ObservableObject {
     
     private var scanProcess: Process?
     private let scriptDir: String
+    private let cardDefaults: UserDefaults
     private let storageKey = "mak5er.aircard.savedCards"
     private let legacyStorageKey1 = "mak5er.savedCards"
     private let legacyStorageKey2 = "LumiCards.savedCards"
     
-    nonisolated static let cardRegexes: [NSRegularExpression] = [
-        try! NSRegularExpression(pattern: "/(?:Cards|Passes/Cards)/([-A-Za-z0-9_+=]{20,44})(?:\\.pkpass|\\.cache|\\.pkcache|/|\\s|\"|'|\\)|,|$)"),
-        try! NSRegularExpression(pattern: "/([-A-Za-z0-9_+=]{20,44})\\.(?:pkpass|cache|pkcache)"),
-        try! NSRegularExpression(pattern: "(?<![A-Za-z0-9+/_-])([A-Za-z0-9+/_-]{27}=)(?![A-Za-z0-9+/_-])")
-    ]
-    
-    init() {
+    init(cardDefaults: UserDefaults = .standard, connectOnLaunch: Bool = true) {
+        self.cardDefaults = cardDefaults
         let cwd = FileManager.default.currentDirectoryPath
         if let resPath = Bundle.main.resourcePath, FileManager.default.fileExists(atPath: resPath + "/aircard_backend.py") {
             self.scriptDir = resPath
@@ -518,7 +538,7 @@ class AppViewModel: ObservableObject {
         }
         
         loadSavedCards()
-        checkDevice()
+        if connectOnLaunch { checkDevice() }
     }
     
     func log(_ message: String) {
@@ -626,61 +646,190 @@ class AppViewModel: ObservableObject {
     
     // MARK: - Persistence
     
+    private var walletStorageKey: String {
+        "mak5er.aircard.wallet.v2." + (activeCardDeviceID ?? "unassigned")
+    }
+
     func loadSavedCards() {
-        var loaded: [String] = []
-        
-        if let saved = UserDefaults.standard.stringArray(forKey: storageKey), !saved.isEmpty {
-            loaded.append(contentsOf: saved)
-        } else if let saved = UserDefaults.standard.stringArray(forKey: legacyStorageKey1), !saved.isEmpty {
-            loaded.append(contentsOf: saved)
-        } else if let saved = UserDefaults.standard.stringArray(forKey: legacyStorageKey2), !saved.isEmpty {
-            loaded.append(contentsOf: saved)
+        isLoadingCards = true
+        defer { isLoadingCards = false }
+        var records: [WalletSavedCard]
+        if let data = cardDefaults.data(forKey: walletStorageKey),
+           let saved = try? JSONDecoder().decode([WalletSavedCard].self, from: data) {
+            records = saved
+        } else {
+            // Old stores have no device provenance. Import once as unconfirmed,
+            // including an explicitly empty store so deleted cards stay deleted.
+            var loaded = cardDefaults.stringArray(forKey: storageKey)
+                ?? cardDefaults.stringArray(forKey: legacyStorageKey1)
+                ?? cardDefaults.stringArray(forKey: legacyStorageKey2)
+            if loaded == nil {
+                for path in ["~/.aircard_cards.json", "~/.lumicards_cards.json"] {
+                    let url = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
+                    if let data = try? Data(contentsOf: url),
+                       let ids = try? JSONDecoder().decode([String].self, from: data) {
+                        loaded = ids
+                        break
+                    }
+                }
+            }
+            records = (loaded ?? []).filter { !WalletScanParser.placeholders.contains($0) }.map { WalletSavedCard(id: $0) }
         }
-        
-        for p in ["~/.aircard_cards.json", "~/.lumicards_cards.json"] {
-            let jsonPath = NSString(string: p).expandingTildeInPath
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: jsonPath)),
-               let jsonHashes = try? JSONDecoder().decode([String].self, from: data) {
-                for h in jsonHashes where !loaded.contains(h) {
-                    loaded.append(h)
+        cards = WalletSavedCard.unique(records).map { record in
+            let url = record.imagePath.map { URL(fileURLWithPath: $0) }
+            return CardItem(id: record.id, isSelected: record.selected, customImageURL: url,
+                            customImage: url.flatMap { NSImage(contentsOf: $0) }, confirmed: record.confirmed)
+        }
+        log("Loaded \(cards.count) saved card(s); \(confirmedCardIDs.count) previously scanned on this iPhone.")
+    }
+
+    func saveCards() {
+        let records = WalletSavedCard.unique(cards.map {
+            WalletSavedCard(id: $0.id, confirmed: $0.confirmed, imagePath: $0.customImageURL?.path, selected: $0.isSelected)
+        })
+        if let data = try? JSONEncoder().encode(records) {
+            cardDefaults.set(data, forKey: walletStorageKey)
+        }
+    }
+
+    func activateCardDevice(_ udid: String?) {
+        guard activeCardDeviceID != udid else { return }
+        stopCardScanning()
+        saveCards()
+        activeCardDeviceID = udid
+        catalogRequestID = UUID()
+        walletCatalog = .empty
+        currentScanIDs = []
+        currentPreloadedIDs = []
+        pendingActivationIDs = []
+        loadSavedCards()
+        saveCards()
+    }
+
+    func refreshWalletCatalog() {
+        guard let device, device.connected, let udid = device.udid else {
+            walletCatalog = .empty
+            isReadingWalletCache = false
+            return
+        }
+        let requestID = UUID()
+        catalogRequestID = requestID
+        isReadingWalletCache = true
+        let request: [String: Any] = ["product": device.product ?? "", "confirmedIDs": Array(confirmedCardIDs)]
+        guard let requestData = try? JSONSerialization.data(withJSONObject: request) else { return }
+        let scriptDir = self.scriptDir
+        Task.detached {
+            var catalog: WalletCatalog
+            do {
+                let process = Process()
+                process.executableURL = AppViewModel.pythonExecutableURL
+                process.environment = AppViewModel.processEnvironment
+                process.currentDirectoryURL = URL(fileURLWithPath: scriptDir)
+                process.arguments = ["wallet_catalog.py"]
+                let input = Pipe()
+                let output = Pipe()
+                process.standardInput = input
+                process.standardOutput = output
+                process.standardError = FileHandle.nullDevice
+                try process.run()
+                input.fileHandleForWriting.write(requestData)
+                try? input.fileHandleForWriting.close()
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                guard process.terminationStatus == 0 else { throw CocoaError(.fileReadUnknown) }
+                catalog = try JSONDecoder().decode(WalletCatalog.self, from: data)
+            } catch {
+                catalog = .empty
+                catalog.warnings = ["Could not read Wallet metadata. Scanning still works. Use Read Cache to retry."]
+            }
+            let result = catalog
+            await MainActor.run {
+                guard self.catalogRequestID == requestID, self.activeCardDeviceID == udid else { return }
+                self.walletCatalog = result
+                self.isReadingWalletCache = false
+                for index in self.cards.indices {
+                    let name = result.name(for: self.cards[index].id)
+                    if self.cards[index].displayName != name { self.cards[index].displayName = name }
+                }
+                if self.isScanningCards {
+                    self.reconcilePendingPaymentActivations()
                 }
             }
         }
-        
-        let dummyHashes = [
-            "M6nDwZrkYbFlsodLgCbvyFZQ1cc=",
-            "kJL-D0rr-SZhbj2c8nK-OQ9hCMY=",
-            "hwAtAmHKYwsQrJbT5cTNDsaxVME="
-        ]
-        loaded.removeAll { dummyHashes.contains($0) || ($0.contains("-") && $0.count == 36) }
-        
-        self.cards = loaded.map { CardItem(id: $0, isSelected: true) }
-        log("Loaded \(cards.count) real card(s) from storage.")
     }
-    
-    func saveCards() {
-        let hashes = cards.map { $0.id }
-        UserDefaults.standard.set(hashes, forKey: storageKey)
-        
-        let jsonPath = NSString(string: "~/.aircard_cards.json").expandingTildeInPath
-        if let data = try? JSONEncoder().encode(hashes) {
-            try? data.write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+
+    func recordScannedCard(_ id: String) {
+        let newlySeen = currentScanIDs.insert(id).inserted
+        if let index = cards.firstIndex(where: { $0.id == id }) {
+            if !cards[index].confirmed { cards[index].confirmed = true }
+        } else {
+            cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id), confirmed: true))
+            NSSound(named: "Glass")?.play()
+        }
+        scannerMessage = "Detected \(currentScanIDs.count) distinct card(s) this scan. Open any missing card in Wallet to check it."
+        if newlySeen && (walletCatalog.paymentStatus != "matched" || walletCatalog.name(for: id) == nil) {
+            catalogRefreshTask?.cancel()
+            catalogRefreshTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                guard !Task.isCancelled else { return }
+                self.refreshWalletCatalog()
+            }
         }
     }
-    
+
+    func recordPreloadedCard(_ id: String) {
+        guard currentPreloadedIDs.insert(id).inserted else { return }
+        if let index = cards.firstIndex(where: { $0.id == id }) {
+            if !cards[index].confirmed { cards[index].confirmed = true }
+        } else {
+            cards.append(CardItem(id: id, displayName: walletCatalog.name(for: id), confirmed: true))
+            NSSound(named: "Glass")?.play()
+        }
+        scannerMessage = "Verified \(currentVerifiedCardIDs.count) card(s) from this iPhone's current Wallet activity."
+    }
+
+    @discardableResult
+    func recordActivatedPaymentCard(_ activationID: String, refreshIfNeeded: Bool = true) -> Bool {
+        let normalizedID = activationID.uppercased()
+        guard let card = walletCatalog.payment(forActivationID: normalizedID) else {
+            pendingActivationIDs.insert(normalizedID)
+            scannerMessage = isReadingWalletCache
+                ? "Payment card activated. Waiting for Wallet metadata to finish loading…"
+                : "A payment card was activated, but its ID is not available in this Mac's Wallet cache. Use Read Cache and try again."
+            if refreshIfNeeded && device?.connected == true && !isReadingWalletCache {
+                refreshWalletCatalog()
+            }
+            return false
+        }
+        pendingActivationIDs.remove(normalizedID)
+        recordScannedCard(card.id)
+        if let index = cards.firstIndex(where: { $0.id == card.id }) {
+            cards[index].displayName = card.name
+        }
+        scannerMessage = "Detected active card: \(card.name). Open the next card when ready."
+        return true
+    }
+
+    func reconcilePendingPaymentActivations() {
+        for activationID in Array(pendingActivationIDs) {
+            _ = recordActivatedPaymentCard(activationID, refreshIfNeeded: false)
+        }
+    }
+
     func addCardHash(_ raw: String) {
         let components = raw.components(separatedBy: CharacterSet(charactersIn: " \n\r\t,;"))
         var addedCount = 0
         for comp in components {
             let clean = comp.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "."))
             if clean.count >= 16 && clean.count <= 64 && !cards.contains(where: { $0.id == clean }) {
-                cards.append(CardItem(id: clean, isSelected: true))
+                cards.append(CardItem(id: clean, isSelected: true, displayName: walletCatalog.name(for: clean)))
                 addedCount += 1
                 log("Added card: \(clean)")
             }
         }
         if addedCount > 0 {
             saveCards()
+            scannerMessage = "Saved \(addedCount) ID(s) for matching. They stay hidden until this iPhone exposes them in a scan."
         }
     }
     
@@ -716,6 +865,7 @@ class AppViewModel: ObservableObject {
     // MARK: - Device Connection
     
     func checkDevice() {
+        guard !isCheckingDevice, !isFlashing else { return }
         isCheckingDevice = true
         statusText = "Checking connected devices..."
         let scriptDir = self.scriptDir
@@ -738,31 +888,74 @@ class AppViewModel: ObservableObject {
                 
                 if let dev = try? JSONDecoder().decode(DeviceInfo.self, from: data) {
                     await MainActor.run {
+                        self.activateCardDevice(dev.connected ? dev.udid : nil)
                         self.device = dev
+                        self.refreshWalletCatalog()
                         self.isCheckingDevice = false
                         if dev.connected {
                             self.statusText = "Connected to \(dev.name ?? "iPhone")"
                             self.log("Device connected: \(dev.name ?? "iPhone") (\(dev.product ?? ""), iOS \(dev.version ?? ""))")
+                            self.applyDevicePreferences(from: dev)
                         } else if dev.error == "device_helper_missing" {
+                            self.scannerMessage = "Device tools are missing. Rebuild or reinstall AirCard, then reconnect."
                             self.statusText = "Device tools are missing from this build."
                             self.log("Bundled device_helper not found — detection cannot run.")
                         } else {
                             self.statusText = "No iPhone found. Please connect via USB."
+                            self.scannerMessage = "No iPhone connected. Connect, unlock and trust this Mac, then use Reconnect."
                         }
                     }
                 } else {
                     await MainActor.run {
+                        self.activateCardDevice(nil)
+                        self.device = nil
+                        self.refreshWalletCatalog()
                         self.isCheckingDevice = false
                         self.statusText = "No iPhone found. Please connect via USB."
+                        self.scannerMessage = "Device check failed. Reconnect and unlock the iPhone, then retry."
                     }
                 }
             } catch {
                 await MainActor.run {
+                    self.activateCardDevice(nil)
+                    self.device = nil
+                    self.refreshWalletCatalog()
                     self.isCheckingDevice = false
+                    self.scannerMessage = "Device check failed. Reconnect and unlock the iPhone, then retry."
                     self.statusText = "Device detection failed: \(error.localizedDescription)"
                 }
             }
         }
+    }
+    
+    func applyDevicePreferences(from dev: DeviceInfo) {
+        // 1. Auto-detect TelephonyUI version based on iOS major version
+        if let verStr = dev.version, let major = Int(verStr.components(separatedBy: ".").first ?? "") {
+            if major >= 18 {
+                self.targetTelephonyVersion = "TelephonyUI-10"
+            } else if major >= 16 {
+                self.targetTelephonyVersion = "TelephonyUI-9"
+            } else {
+                self.targetTelephonyVersion = "TelephonyUI-8"
+            }
+        }
+        
+        // 2. Auto-detect language
+        if let langCode = dev.language?.components(separatedBy: "-").first?.lowercased() {
+            for target in PasscodeLanguageTarget.allCases {
+                if target.code == langCode {
+                    self.passcodeLanguageTarget = target
+                    break
+                }
+            }
+        }
+        
+        // 3. Auto-detect bold text
+        if let isBold = dev.bold_text {
+            self.passcodeBoldTarget = isBold ? .boldOnly : .regularOnly
+        }
+        
+        self.log("  ⚡ Auto-configured passcode target: \(self.targetTelephonyVersion), language: \(self.passcodeLanguageTarget.rawValue), font: \(self.passcodeBoldTarget.rawValue)")
     }
     
     // MARK: - Live Card Scanner
@@ -776,17 +969,23 @@ class AppViewModel: ObservableObject {
     }
     
     func startCardScanning() {
-        guard !isScanningCards else { return }
+        guard !isScanningCards, !isFlashing, !isCheckingDevice else { return }
         guard let deviceHelper = AppViewModel.deviceHelperExecutableURL else {
             errorMessage = "Device tools are missing from this build."
+            scannerMessage = "Device tools are missing. Rebuild or reinstall AirCard, then reconnect."
             log("Bundled device_helper not found — cannot scan.")
             return
         }
         guard let udid = device?.udid else {
             errorMessage = "No iPhone connected."
+            scannerMessage = "No iPhone connected. Connect, unlock and trust this Mac, then use Reconnect."
             return
         }
         isScanningCards = true
+        currentScanIDs = []
+        currentPreloadedIDs = []
+        pendingActivationIDs = []
+        scannerMessage = "Connecting to the iPhone log stream…"
         statusText = "Double-click Side button, pass Face ID, then tap your card..."
         log("Started scanning device logs for cards...")
         
@@ -806,15 +1005,10 @@ class AppViewModel: ObservableObject {
             scanProcess = nil
             isScanningCards = false
             statusText = "Could not start card scanning."
+            scannerMessage = "Scanner could not start. Reconnect the iPhone and try again."
             log("Syslog monitor failed to start: \(error.localizedDescription)")
             return
         }
-        
-        let dummyHashes = [
-            "M6nDwZrkYbFlsodLgCbvyFZQ1cc=",
-            "kJL-D0rr-SZhbj2c8nK-OQ9hCMY=",
-            "hwAtAmHKYwsQrJbT5cTNDsaxVME="
-        ]
         
         Task.detached {
             do {
@@ -841,6 +1035,11 @@ class AppViewModel: ObservableObject {
                             await MainActor.run {
                                 guard self.scanProcess === proc else { return }
                                 self.log(line)
+                                if line.contains("Connected to the unified") {
+                                    self.scannerMessage = "Scanner connected. Open Wallet and tap a card; membership cards may need opening in the Wallet app."
+                                } else {
+                                    self.scannerMessage = String(line.dropFirst("AirCard scanner: ".count))
+                                }
                             }
                             continue
                         }
@@ -849,9 +1048,13 @@ class AppViewModel: ObservableObject {
                         let isWalletSubsystem = lower.contains("passd") ||
                                                 lower.contains("passbook") ||
                                                 lower.contains("passkit") ||
+                                                lower.contains("nfcd") ||
                                                 lower.contains("stockholm") ||
                                                 lower.contains("nanopassd") ||
                                                 lower.contains("wallet") ||
+                                                lower.contains("pdcardfilemanager") ||
+                                                lower.contains("pdpasslibrary") ||
+                                                lower.contains("verificationcheck") ||
                                                 lower.contains("/cards/")
                         
                         guard isWalletSubsystem else { continue }
@@ -865,28 +1068,24 @@ class AppViewModel: ObservableObject {
                                               lower.contains("face") ||
                                               lower.contains("cache") ||
                                               lower.contains("stockholm") ||
+                                              lower.contains("pdcardfilemanager") ||
+                                              lower.contains("pdpasslibrary") ||
+                                              lower.contains("verificationcheck") ||
                                               lower.contains("/cards/")
                         
                         guard isWalletContext else { continue }
+
+                        for activationID in WalletScanParser.activationIDs(in: line) {
+                            await MainActor.run {
+                                guard self.scanProcess === proc else { return }
+                                self.recordActivatedPaymentCard(activationID)
+                            }
+                        }
                         
-                        for regex in AppViewModel.cardRegexes {
-                            let matches = regex.matches(in: line, range: NSRange(line.startIndex..., in: line))
-                            for m in matches {
-                                if m.numberOfRanges > 1, let r = Range(m.range(at: 1), in: line) {
-                                    let candidate = String(line[r])
-                                    if candidate.count == 36 && candidate.contains("-") { continue }
-                                    if dummyHashes.contains(candidate) { continue }
-                                    
-                                    await MainActor.run {
-                                        guard self.scanProcess === proc else { return }
-                                        if !self.cards.contains(where: { $0.id == candidate }) {
-                                            self.cards.append(CardItem(id: candidate, isSelected: true))
-                                            self.saveCards()
-                                            self.log("Found card: \(candidate)")
-                                            NSSound(named: "Glass")?.play()
-                                        }
-                                    }
-                                }
+                        for candidate in WalletScanParser.cardIDs(in: line) {
+                            await MainActor.run {
+                                guard self.scanProcess === proc else { return }
+                                self.recordPreloadedCard(candidate)
                             }
                         }
                     }
@@ -898,6 +1097,7 @@ class AppViewModel: ObservableObject {
                     self.scanProcess = nil
                     self.isScanningCards = false
                     self.statusText = "Card scanning ended. Check the log and reconnect the iPhone to retry."
+                    self.scannerMessage = "Scanner stopped unexpectedly (exit \(proc.terminationStatus)). Reconnect and unlock the iPhone, then scan again. Check Log for details."
                     self.log("Syslog monitor exited (status \(proc.terminationStatus)). Total cards: \(self.cards.count).")
                     self.saveCards()
                 }
@@ -910,12 +1110,18 @@ class AppViewModel: ObservableObject {
                     self.log("Syslog monitor stopped: \(error.localizedDescription)")
                     self.isScanningCards = false
                     self.statusText = "Card scanning failed. Check the log and retry."
+                    self.scannerMessage = "The log connection failed. Reconnect the iPhone and retry scanning."
                 }
             }
         }
     }
     
     func stopCardScanning() {
+        catalogRefreshTask?.cancel()
+        pendingActivationIDs = []
+        if isScanningCards {
+            scannerMessage = currentScanIDs.isEmpty ? "No cards detected in this scan. Open Wallet and tap the missing card, then retry. Some iOS logs hide identifiers." : "Scan stopped. \(currentScanIDs.count) distinct card(s) seen; missing cards remain unconfirmed."
+        }
         let process = scanProcess
         scanProcess = nil
         if let process, process.isRunning { process.terminate() }
@@ -925,6 +1131,7 @@ class AppViewModel: ObservableObject {
         }
         saveCards()
         log("Scanning stopped. Total cards: \(cards.count).")
+        if process != nil { refreshWalletCatalog() }
     }
     
     // MARK: - Skin Application
@@ -934,7 +1141,8 @@ class AppViewModel: ObservableObject {
             errorMessage = "No iPhone connected."
             return
         }
-        let selectedCardsWithSkin = cards.filter { $0.isSelected && $0.customImageURL != nil }
+        let verifiedIDs = currentVerifiedCardIDs
+        let selectedCardsWithSkin = cards.filter { verifiedIDs.contains($0.id) && $0.isSelected && $0.customImageURL != nil }
         guard !selectedCardsWithSkin.isEmpty else {
             errorMessage = "Please assign a skin image to at least one selected card."
             return
@@ -1413,6 +1621,7 @@ struct WalletCardView: View {
     let onPickImage: () -> Void
     let onClearImage: () -> Void
     let onDelete: () -> Void
+    let onDropImage: (URL) -> Void
     
     @State private var isHovered = false
     @State private var isTargeted = false
@@ -1541,22 +1750,18 @@ struct WalletCardView: View {
                         } else if let data = item as? Data, let urlStr = String(data: data, encoding: .utf8), let url = URL(string: urlStr) {
                             fileURL = url
                         }
-                        if let url = fileURL, let img = NSImage(contentsOf: url) {
+                        if let url = fileURL, NSImage(contentsOf: url) != nil {
                             Task { @MainActor in
-                                card.customImageURL = url
-                                card.customImage = img
-                                card.isSelected = true
+                                onDropImage(url)
                             }
                         }
                     }
                     return true
                 } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
                     provider.loadItem(forTypeIdentifier: UTType.image.identifier, options: nil) { item, _ in
-                        if let url = item as? URL, let img = NSImage(contentsOf: url) {
+                        if let url = item as? URL, NSImage(contentsOf: url) != nil {
                             Task { @MainActor in
-                                card.customImageURL = url
-                                card.customImage = img
-                                card.isSelected = true
+                                onDropImage(url)
                             }
                         } else if let img = item as? NSImage {
                             let tempURL = FileManager.default.temporaryDirectory
@@ -1567,9 +1772,7 @@ struct WalletCardView: View {
                                 try? pngData.write(to: tempURL)
                             }
                             Task { @MainActor in
-                                card.customImageURL = tempURL
-                                card.customImage = img
-                                card.isSelected = true
+                                onDropImage(tempURL)
                             }
                         }
                     }
@@ -1578,13 +1781,28 @@ struct WalletCardView: View {
                 return false
             }
             
+            VStack(alignment: .leading, spacing: 3) {
+                Text(card.displayName ?? "Unidentified card")
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(2)
+                    .help(card.displayName ?? "No matching name in the Mac cache. The card ID is preserved.")
+                Text("Observed on this iPhone in the current scan")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if card.customImageURL != nil && card.customImage == nil {
+                    Text("Skin file unavailable. Choose the image again.")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
             // Bottom Info & Controls
             HStack(spacing: 8) {
                 Toggle("", isOn: $card.isSelected)
                     .labelsHidden()
                     .help("Include in flash")
                 
-                Text("Card #\(cardIndex + 1)")
+                Text("#\(cardIndex + 1)")
                     .font(.system(size: 12, weight: .semibold))
                 
                 // Monospace Hash Pill with Copy
@@ -1655,7 +1873,7 @@ struct ContentView: View {
     @State private var isTargetedTheme = false
     
     private var readyToFlashCount: Int {
-        vm.cards.filter { $0.isSelected && $0.customImageURL != nil }.count
+        vm.currentVerifiedCards.filter { $0.isSelected && $0.customImageURL != nil }.count
     }
     
     var body: some View {
@@ -1689,10 +1907,15 @@ struct ContentView: View {
                 Divider()
             }
             
+            if vm.selectedTab == .walletCards {
+                WalletDiagnosticsView(vm: vm)
+                Divider()
+            }
+
             // 4. Main Workspace
             if vm.selectedTab == .walletCards {
                 ScrollView {
-                    if vm.cards.isEmpty {
+                    if vm.currentVerifiedCards.isEmpty {
                         emptyStateView
                             .padding(.top, 40)
                     } else {
@@ -1700,14 +1923,22 @@ struct ContentView: View {
                             columns: [GridItem(.adaptive(minimum: 310, maximum: 360), spacing: 20)],
                             spacing: 20
                         ) {
-                            ForEach(Array(vm.cards.indices), id: \.self) { idx in
-                                WalletCardView(
-                                    card: $vm.cards[idx],
-                                    cardIndex: idx,
-                                    onPickImage: { openCardImagePicker(for: vm.cards[idx].id) },
-                                    onClearImage: { vm.clearCardImage(for: vm.cards[idx].id) },
-                                    onDelete: { vm.deleteCard(id: vm.cards[idx].id) }
-                                )
+                            ForEach(Array(vm.currentVerifiedCards.enumerated()), id: \.element.id) { visibleIndex, verifiedCard in
+                                if let cardIndex = vm.cards.firstIndex(where: { $0.id == verifiedCard.id }) {
+                                    let cardID = verifiedCard.id
+                                    let deviceID = vm.device?.udid
+                                    WalletCardView(
+                                        card: $vm.cards[cardIndex],
+                                        cardIndex: visibleIndex,
+                                        onPickImage: { openCardImagePicker(for: cardID) },
+                                        onClearImage: { vm.clearCardImage(for: cardID) },
+                                        onDelete: { vm.deleteCard(id: cardID) },
+                                        onDropImage: { url in
+                                            guard vm.device?.udid == deviceID else { return }
+                                            vm.setCardImage(for: cardID, url: url)
+                                        }
+                                    )
+                                }
                             }
                         }
                         .padding(20)
@@ -1772,7 +2003,7 @@ struct ContentView: View {
                     Text("AirCard")
                         .font(.title2)
                         .fontWeight(.bold)
-                    Text("v1.2.3")
+                    Text("v1.2.4-kyler.1")
                         .font(.system(size: 10, weight: .bold, design: .rounded))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -1827,7 +2058,7 @@ struct ContentView: View {
                         .font(.system(size: 11))
                 }
                 .buttonStyle(.plain)
-                .disabled(vm.isCheckingDevice)
+                .disabled(vm.isCheckingDevice || vm.isFlashing)
                 .help("Refresh device connection")
             }
             .padding(.horizontal, 10)
@@ -1852,7 +2083,7 @@ struct ContentView: View {
             // Live Scanner Toggle
             Button(action: { vm.toggleCardScanning() }) {
                 HStack(spacing: 6) {
-                    if vm.isScanningCards {
+                    if vm.isScanningCards || vm.isCheckingDevice {
                         ProgressView()
                             .scaleEffect(0.65)
                             .frame(width: 16, height: 16)
@@ -1860,22 +2091,22 @@ struct ContentView: View {
                         Image(systemName: "wave.3.forward.circle.fill")
                             .frame(width: 16, height: 16)
                     }
-                    Text(vm.isScanningCards ? "Stop Scanning" : "Scan Cards")
+                    Text(vm.isCheckingDevice ? "Checking iPhone…" : vm.isScanningCards ? "Stop Scanning" : "Scan Cards")
                         .fontWeight(.semibold)
                 }
             }
             .buttonStyle(.borderedProminent)
             .tint(vm.isScanningCards ? .red : .blue)
             .controlSize(.regular)
-            .disabled(vm.device?.connected != true)
+            .disabled(vm.device?.connected != true || vm.isCheckingDevice || vm.isFlashing)
             
             Button(action: { vm.showAddCardSheet = true }) {
-                Label("Add Manually", systemImage: "plus")
+                Label("Save IDs", systemImage: "plus")
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)
             
-            if !vm.cards.isEmpty {
+            if !vm.currentVerifiedCards.isEmpty {
                 Button(action: openBulkImagePicker) {
                     Label("Set Skin for All...", systemImage: "photo.on.rectangle.angled")
                 }
@@ -1886,10 +2117,13 @@ struct ContentView: View {
             
             Spacer()
             
-            if !vm.cards.isEmpty {
+            if !vm.currentVerifiedCards.isEmpty {
                 HStack(spacing: 8) {
                     Button("Select All") {
-                        for idx in vm.cards.indices { vm.cards[idx].isSelected = true }
+                        let verifiedIDs = vm.currentVerifiedCardIDs
+                        for idx in vm.cards.indices where verifiedIDs.contains(vm.cards[idx].id) {
+                            vm.cards[idx].isSelected = true
+                        }
                     }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -1897,7 +2131,10 @@ struct ContentView: View {
                     Text("·").foregroundColor(.secondary)
                     
                     Button("Deselect All") {
-                        for idx in vm.cards.indices { vm.cards[idx].isSelected = false }
+                        let verifiedIDs = vm.currentVerifiedCardIDs
+                        for idx in vm.cards.indices where verifiedIDs.contains(vm.cards[idx].id) {
+                            vm.cards[idx].isSelected = false
+                        }
                     }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -1952,7 +2189,7 @@ struct ContentView: View {
                 .font(.system(size: 54))
                 .foregroundColor(.accentColor.opacity(0.8))
             
-            Text("No Cards Detected Yet")
+            Text(vm.isScanningCards ? "Scanning for Cards…" : "No Cards Detected Yet")
                 .font(.title3)
                 .fontWeight(.bold)
             
@@ -1961,7 +2198,7 @@ struct ContentView: View {
                     Text("1.")
                         .fontWeight(.bold)
                         .foregroundColor(.accentColor)
-                    Text("Click **Scan Cards** in the toolbar above.")
+                    Text(vm.isScanningCards ? "Scanner is active. Open Wallet on your iPhone." : "Click **Scan Cards** in the toolbar above.")
                 }
                 HStack(alignment: .top, spacing: 10) {
                     Text("2.")
@@ -1973,7 +2210,7 @@ struct ContentView: View {
                     Text("3.")
                         .fontWeight(.bold)
                         .foregroundColor(.accentColor)
-                    Text("Your card will be detected immediately!")
+                    Text(vm.isScanningCards ? "Detected cards will appear here as the iPhone reports them." : "Your card will be detected immediately!")
                 }
             }
             .font(.subheadline)
@@ -1984,15 +2221,15 @@ struct ContentView: View {
             .cornerRadius(12)
             
             HStack(spacing: 12) {
-                Button(action: { vm.startCardScanning() }) {
-                    Label("Start Scanning", systemImage: "wave.3.forward.circle.fill")
+                Button(action: { vm.toggleCardScanning() }) {
+                    Label(vm.isCheckingDevice ? "Checking iPhone…" : vm.isScanningCards ? "Stop Scanning" : "Start Scanning", systemImage: "wave.3.forward.circle.fill")
                         .fontWeight(.semibold)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.regular)
-                .disabled(vm.device?.connected != true)
+                .disabled(vm.device?.connected != true || vm.isCheckingDevice || vm.isFlashing)
                 
-                Button("Add Hashes Manually") {
+                Button("Save IDs for Matching") {
                     vm.showAddCardSheet = true
                 }
                 .buttonStyle(.bordered)
@@ -2933,6 +3170,17 @@ struct ContentView: View {
                     .fontWeight(.semibold)
                     .foregroundColor(.primary)
                 Spacer()
+                if let dev = vm.device, dev.connected {
+                    Button(action: { vm.applyDevicePreferences(from: dev) }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "sparkles")
+                            Text("Auto-detect")
+                        }
+                        .font(.system(size: 9, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Reset to iPhone's detected language and font style")
+                }
             }
             
             // 1. Language Target Selector
@@ -3083,8 +3331,8 @@ struct ContentView: View {
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
                         }
-                    } else if !vm.cards.isEmpty {
-                        Text("\(vm.cards.filter { $0.isSelected }.count) of \(vm.cards.count) cards selected · \(readyToFlashCount) ready to flash")
+                    } else if !vm.currentVerifiedCards.isEmpty {
+                        Text("\(vm.currentVerifiedCards.filter { $0.isSelected }.count) of \(vm.currentVerifiedCards.count) verified cards selected · \(readyToFlashCount) ready to flash")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }
@@ -3268,9 +3516,9 @@ struct ContentView: View {
     
     private var addCardSheet: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Add Card Hashes Manually")
+            Text("Save Card IDs for Matching")
                 .font(.headline)
-            Text("Paste one or more card hashes (separated by spaces, commas, or newlines):")
+            Text("Paste one or more card IDs. Saved IDs remain hidden until the connected iPhone exposes them in a scan.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             
@@ -3290,7 +3538,7 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                Button("Add to List") {
+                Button("Save IDs") {
                     vm.addCardHash(vm.manualHashInput)
                     vm.showAddCardSheet = false
                     vm.manualHashInput = ""
@@ -3322,7 +3570,7 @@ struct ContentView: View {
         panel.canChooseDirectories = false
         panel.message = "Choose a skin to assign to all selected cards..."
         if panel.runModal() == .OK, let url = panel.url {
-            for card in vm.cards where card.isSelected {
+            for card in vm.currentVerifiedCards where card.isSelected {
                 vm.setCardImage(for: card.id, url: url)
             }
         }
@@ -3454,6 +3702,7 @@ struct ContentView: View {
 
 // MARK: - App Entry Point
 
+#if !WALLET_TESTS
 @main
 struct AirCardApp: App {
     var body: some Scene {
@@ -3464,3 +3713,4 @@ struct AirCardApp: App {
         .windowResizability(.contentSize)
     }
 }
+#endif

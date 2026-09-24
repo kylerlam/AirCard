@@ -52,6 +52,24 @@
 5. Click **Flash Skins**.
 6. Force-close the **Wallet** app on your iPhone from the App Switcher (or reboot) to see your new custom card design!
 
+### Card names and missing-card checks
+
+Scanned cards can now display names from this Mac's Wallet cache. Open **Check
+missing cards** to distinguish scan-confirmed IDs from payment and membership
+cache entries that still need confirmation. Use **Reconnect** for connection
+problems and **Read Cache** to reread local metadata.
+
+For payment cards, AirCard uses the NFC activation event for the card you
+actually open. Wallet may also request artwork for several cards; IDs observed
+in those current iPhone log paths can appear in a batch. Saved IDs from an
+earlier run remain hidden until the current scan observes them again.
+
+Cards and skin file paths are saved by ID separately for each iPhone, in stable
+local discovery order. Only IDs observed in the current scan are shown or
+eligible to flash; saved records only restore their skin after revalidation.
+Cache counts are not the phone's total, and phone Wallet order is not synchronized. See
+[card identification and diagnostics](docs/wallet-discovery.md).
+
 ### If scanning finds no cards
 
 The scanner uses the iPhone's unified log service, including Info/Debug events.

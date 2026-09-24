@@ -206,6 +206,19 @@ static void EnumerateCallback(AMDeviceNotificationCallbackInfo *info,
                 entry[field] =
                     [value isKindOfClass:NSString.class] ? value : @"";
             }
+            id language = CFBridgingRelease(AMDeviceCopyValue(
+                info->device, CFSTR("com.apple.international"), CFSTR("Language")));
+            entry[@"language"] = [language isKindOfClass:NSString.class] ? language : @"en";
+
+            id locale = CFBridgingRelease(AMDeviceCopyValue(
+                info->device, CFSTR("com.apple.international"), CFSTR("Locale")));
+            entry[@"locale"] = [locale isKindOfClass:NSString.class] ? locale : @"";
+
+            id boldText = CFBridgingRelease(AMDeviceCopyValue(
+                info->device, CFSTR("com.apple.Accessibility"), CFSTR("EnhancedTextLegibility")));
+            if (boldText) {
+                entry[@"bold_text"] = @([boldText boolValue]);
+            }
             AMDeviceStopSession(info->device);
         }
         AMDeviceDisconnect(info->device);
@@ -1022,6 +1035,43 @@ static NSDictionary *FinishWrite(DeviceSession *session, NSArray<NSString *> *ar
               @"booksRestore": booksRestore };
 }
 
+static NSDictionary *FinishMovedRemoval(DeviceSession *session, NSArray<NSString *> *args) {
+    NSString *source = args[0];
+    NSString *linkDestination = args[1];
+    NSString *recovered = args[2];
+    NSString *snapshotRoot = args[3];
+    NSInteger expectedCount = [args[4] integerValue];
+    BOOL safeArguments = GeneratedNamesMatch(source, linkDestination, recovered) &&
+        expectedCount > 0 && expectedCount <= 32;
+    if (!safeArguments) return @{ @"ok": @NO, @"safeArguments": @NO };
+
+    NSMutableArray<NSString *> *missing = NSMutableArray.array;
+    for (NSInteger index = 0; index < expectedCount; index++) {
+        NSString *path = [source stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"removed-%ld", (long)index]];
+        if (!AFCExists(session->afc, path)) [missing addObject:path];
+    }
+    NSMutableArray<NSString *> *failures = NSMutableArray.array;
+    if (!RemoveIfPresent(session->afc, linkDestination)) [failures addObject:@"relocated link"];
+    if (!RemoveIfPresent(session->afc, recovered)) [failures addObject:@"recovered file"];
+    if (!RemoveGeneratedTree(session->afc, source, 0)) [failures addObject:@"StreamingZip tree"];
+    NSDictionary *booksRestore = RestoreBooksState(session->afc, snapshotRoot);
+    if (![booksRestore[@"ok"] boolValue]) [failures addObject:@"Books preimage"];
+    BOOL cleanupComplete = failures.count == 0;
+    // A missing source is already an invalidated cache entry. Report success
+    // when cleanup and Books restoration succeed, while exposing how many
+    // entries were actually moved for diagnostics.
+    return @{ @"ok": @(cleanupComplete),
+              @"safeArguments": @YES,
+              @"movedCount": @(expectedCount - missing.count),
+              @"alreadyAbsentCount": @(missing.count),
+              @"allTargetsMoved": @(missing.count == 0),
+              @"missing": missing,
+              @"cleanupComplete": @(cleanupComplete),
+              @"failures": failures,
+              @"booksRestore": booksRestore };
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         signal(SIGPIPE, SIG_IGN);
@@ -1100,6 +1150,28 @@ int main(int argc, const char *argv[]) {
                     [NSString stringWithUTF8String:argv[5]],
                     [NSString stringWithUTF8String:argv[6]],
                 ]);
+            } else if ([command isEqual:@"finish-moved-removal"] && argc == 8) {
+                operation = FinishMovedRemoval(&session, @[
+                    [NSString stringWithUTF8String:argv[3]],
+                    [NSString stringWithUTF8String:argv[4]],
+                    [NSString stringWithUTF8String:argv[5]],
+                    [NSString stringWithUTF8String:argv[6]],
+                    [NSString stringWithUTF8String:argv[7]],
+                ]);
+            } else if ([command isEqual:@"afc-read"] && argc == 5) {
+                NSString *mediaPath = [NSString stringWithUTF8String:argv[3]];
+                NSString *localOut = [NSString stringWithUTF8String:argv[4]];
+                if (!IsSafeRelativePath(mediaPath)) {
+                    operation = @{ @"ok": @NO, @"error": @"unsafe media path" };
+                } else {
+                    NSData *data = AFCReadFileWithLimit(
+                        session.afc, mediaPath, 32 * 1024 * 1024);
+                    BOOL wrote = data &&
+                        [data writeToFile:localOut options:NSDataWritingAtomic error:nil];
+                    operation = @{ @"ok": @(wrote),
+                                   @"size": @(data.length),
+                                   @"path": mediaPath };
+                }
             }
         }
 
