@@ -55,18 +55,21 @@
 ### Card names and missing-card checks
 
 Scanned cards can now display names from this Mac's Wallet cache. Open **Check
-missing cards** to distinguish scan-confirmed IDs from payment and membership
-cache entries that still need confirmation. Use **Reconnect** for connection
+missing cards** to distinguish current-scan matches from membership entries and
+payment caches that still need confirmation. Use **Reconnect** for connection
 problems and **Read Cache** to reread local metadata.
 
 For payment cards, AirCard uses the NFC activation event for the card you
 actually open. Wallet may also request artwork for several cards; IDs observed
-in those current iPhone log paths can appear in a batch. Saved IDs from an
-earlier run remain hidden until the current scan observes them again.
+in those current iPhone log paths can appear in a batch. Once a live ID matches
+one specific remote-device cache, the remaining payment IDs from that same
+cache are included so cards omitted by iOS logging still appear. Saved IDs from
+an earlier run remain hidden until the current scan matches them again.
 
 Cards and skin file paths are saved by ID separately for each iPhone, in stable
-local discovery order. Only IDs observed in the current scan are shown or
-eligible to flash; saved records only restore their skin after revalidation.
+local discovery order. Only IDs matched during the current scan, either live or
+through the live-ID-matched device cache, are shown or eligible to flash; saved
+records only restore their skin after revalidation.
 Cache counts are not the phone's total, and phone Wallet order is not synchronized. See
 [card identification and diagnostics](docs/wallet-discovery.md).
 
