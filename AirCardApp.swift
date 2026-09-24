@@ -753,6 +753,7 @@ class AppViewModel: ObservableObject {
                 }
                 if self.isScanningCards {
                     self.reconcilePendingPaymentActivations()
+                    self.reconcileMatchedPaymentCards()
                 }
             }
         }
@@ -774,6 +775,9 @@ class AppViewModel: ObservableObject {
                 guard !Task.isCancelled else { return }
                 self.refreshWalletCatalog()
             }
+        }
+        if isScanningCards {
+            reconcileMatchedPaymentCards()
         }
     }
 
@@ -813,6 +817,20 @@ class AppViewModel: ObservableObject {
     func reconcilePendingPaymentActivations() {
         for activationID in Array(pendingActivationIDs) {
             _ = recordActivatedPaymentCard(activationID, refreshIfNeeded: false)
+        }
+    }
+
+    func reconcileMatchedPaymentCards() {
+        guard isScanningCards, walletCatalog.paymentStatus == "matched" else { return }
+        let cachedIDs = Set(walletCatalog.payments.map(\.id))
+        guard !currentVerifiedCardIDs.isDisjoint(with: cachedIDs) else { return }
+        let missing = walletCatalog.payments.filter { !currentVerifiedCardIDs.contains($0.id) }
+        for card in missing {
+            recordPreloadedCard(card.id)
+        }
+        if !missing.isEmpty {
+            scannerMessage = "Matched \(walletCatalog.payments.count) payment card(s) to this iPhone. Open membership cards individually if any are missing."
+            log("Added \(missing.count) payment card(s) from the device-matched Wallet cache.")
         }
     }
 
@@ -1086,6 +1104,7 @@ class AppViewModel: ObservableObject {
                             await MainActor.run {
                                 guard self.scanProcess === proc else { return }
                                 self.recordPreloadedCard(candidate)
+                                self.reconcileMatchedPaymentCards()
                             }
                         }
                     }
@@ -1786,7 +1805,7 @@ struct WalletCardView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(2)
                     .help(card.displayName ?? "No matching name in the Mac cache. The card ID is preserved.")
-                Text("Observed on this iPhone in the current scan")
+                Text("Matched to this iPhone in the current scan")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 if card.customImageURL != nil && card.customImage == nil {
@@ -2003,7 +2022,7 @@ struct ContentView: View {
                     Text("AirCard")
                         .font(.title2)
                         .fontWeight(.bold)
-                    Text("v1.2.4-kyler.1")
+                    Text("v1.2.4-kyler.2")
                         .font(.system(size: 10, weight: .bold, design: .rounded))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)

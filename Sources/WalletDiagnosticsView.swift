@@ -12,9 +12,9 @@ struct WalletDiagnosticsView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("\(vm.currentVerifiedCardIDs.count) verified in this scan · \(vm.cards.count - vm.currentVerifiedCardIDs.count) saved IDs hidden")
+                    Text("\(vm.currentVerifiedCardIDs.count) matched in this scan · \(vm.cards.count - vm.currentVerifiedCardIDs.count) saved IDs hidden")
                         .font(.caption).fontWeight(.semibold)
-                    Text("Only IDs observed in current iPhone activity are shown and eligible to flash")
+                    Text("Includes live IDs and payment cards from a cache matched by a live ID")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()

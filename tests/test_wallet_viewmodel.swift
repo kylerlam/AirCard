@@ -16,10 +16,19 @@ struct WalletViewModelTests {
         precondition(vm.currentVerifiedCards.isEmpty) // Saved records stay hidden until this scan sees them.
         precondition(vm.confirmedCardIDs.isEmpty) // Legacy IDs have no device provenance.
         vm.activateCardDevice("first-phone")
+        vm.isScanningCards = true
+        vm.walletCatalog = WalletCatalog(paymentStatus: "matched", payments: [
+            .init(id: a, name: "Active A", source: "payment"),
+            .init(id: b, name: "Active B", source: "payment")
+        ], memberships: [], warnings: [], cacheUpdatedAt: nil)
+        vm.reconcileMatchedPaymentCards()
+        precondition(vm.currentVerifiedCards.isEmpty) // A cache alone is not enough.
         vm.recordScannedCard(a)
         vm.recordScannedCard(a)
-        precondition(vm.currentScanIDs == [a] && vm.confirmedCardIDs == [a])
+        precondition(vm.currentScanIDs == [a] && vm.confirmedCardIDs == [a, b])
+        precondition(vm.currentVerifiedCardIDs == [a, b])
         precondition(vm.cards.count == 2)
+        vm.isScanningCards = false
         let activation = "A00000000310100100000020"
         precondition(!vm.recordActivatedPaymentCard(activation))
         vm.walletCatalog = WalletCatalog(paymentStatus: "matched", payments: [.init(id: b, name: "Active B", source: "payment", activationID: activation)], memberships: [], warnings: [], cacheUpdatedAt: nil)

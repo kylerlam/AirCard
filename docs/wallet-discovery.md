@@ -13,14 +13,17 @@ Payment-card confirmation uses the activated secure-element application ID
 from the NFC log and maps it to the exact pass ID in the matched Mac cache.
 Wallet's batch resource paths can also verify existence because they are
 observed in the current iPhone log, although their order does not represent
-either user selection or Wallet display order.
+either user selection or Wallet display order. After one live payment ID
+matches exactly one remote-device cache, the remaining payment IDs in that
+same cache are included because iOS does not log every card consistently.
 
-The grid contains only IDs observed in the current scan. Saved records and
-cache-only entries stay hidden and are excluded from flashing until current
-iPhone activity exposes the ID again:
+The grid contains IDs matched during the current scan. Saved records stay
+hidden and are excluded from flashing until current iPhone activity identifies
+the device's payment cache again:
 
-- **Verified in this scan** means the ID has been observed in a pass/cache path
-  or exact activation event in this iPhone's current logs.
+- **Matched in this scan** means the ID was observed in a pass/cache path or
+  exact activation event, or belongs to the one payment cache matched by such
+  a live ID.
 - **Saved IDs to confirm** includes migrated legacy IDs and manually added IDs
   that have not been scanned on this iPhone in the new version.
 - **Payment entries to confirm** come from one matching remote-device cache.
@@ -58,8 +61,9 @@ entries on restart. Saved images retain their file paths; if an original image
 file is moved or deleted, choose it again using the unavailable-image notice.
 
 Saved IDs may remain after a card is removed from the phone, but they are not
-shown or eligible to flash unless a new scan observes them again. AirCard does
-not treat silence in a log or a Mac cache entry as proof that a card exists.
+shown or eligible to flash unless a new scan matches their device cache again.
+AirCard does not use a cache based only on the phone model; it requires an exact
+live card-ID overlap first.
 
 ## Validation
 
