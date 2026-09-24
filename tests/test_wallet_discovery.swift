@@ -12,6 +12,10 @@ struct WalletDiscoveryTests {
         precondition(WalletScanParser.cardIDs(in: "/Cards/<private>.pkpass").isEmpty)
         let ios27Line = "nfcd: passIDs[InSession]: {(\"\(c)\")} passIDs[global]: {(\"\(a)\")}"
         precondition(WalletScanParser.cardIDs(in: ios27Line) == [c])
+        let sessionCards = (0..<12).map { String(format: "%020dAAAAAAA=", $0) }
+        let sessionList = sessionCards.map { "\"\($0)\"" }.joined(separator: ", ")
+        let batchedIOS27Line = "nfcd: passIDs[InSession]: {(\(sessionList))} passIDs[global]: {(\"\(a)\")}"
+        precondition(WalletScanParser.cardIDs(in: batchedIOS27Line) == sessionCards)
         precondition(WalletScanParser.cardIDs(in: "nfcd: passIDs[global]: {(\"\(a)\")}").isEmpty)
         precondition(WalletScanParser.cardIDs(in: "Wallet /Passes/Cards/\(a)/FrontFace") == [a])
         precondition(WalletScanParser.cardIDs(in: "PDCardFileManager: writing card \(b)") == [b])
